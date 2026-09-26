@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         bilibili高清视频下载1080P
 // @namespace    https://github.com/yjln233/bilibili-video-download
-// @version      1.0.0
+// @version      1.1.0
 // @description  Bilibili 全合集/全分P快速解析，支持自定义下拉菜单、当前视频默认勾选、标题/Logo快速下载、批量视频/音频/XML或ASS弹幕字幕、直链优先、DASH无损合流。
 // @author       yjln233
 // @updateURL    https://cdn.jsdelivr.net/gh/yjln233/bilibili-video-download/BilibiliDownloader.user.js
@@ -1736,6 +1736,13 @@
     return urls;
   }
 
+  /*
+   * 挑选视频轨。
+   *
+   * 请求的画质在该视频不可用时不再直接中断，
+   * 而是退到不高于请求档位的最高可用画质。
+   * 返回值带上实际画质与是否降级，供上层标注文件名与状态。
+   */
   function pickExactVideo(
     data,
     requestedQn,
@@ -1750,80 +1757,132 @@
         ? data
             .dash
             .video
+            .filter(
+              video =>
+                Number(
+                  video.id
+                ) >
+                0
+            )
         : [];
 
-    const actualQn =
+    if (
+      !videos.length
+    ) {
+      throw new Error(
+        '当前视频没有可用的 DASH 视频流。'
+      );
+    }
+
+    const wantedQn =
       Number(
-        data
-          ?.quality ||
-        0
+        requestedQn
       );
 
+    const availableQns =
+      [
+        ...new Set(
+          videos.map(
+            video =>
+              Number(
+                video.id
+              )
+          )
+        ),
+      ].sort(
+        (
+          a,
+          b
+        ) =>
+          b -
+          a
+      );
+
+    let targetQn =
+      availableQns.includes(
+        wantedQn
+      )
+        ? wantedQn
+        : null;
+
+    let degraded =
+      false;
+
     if (
-      actualQn &&
-      actualQn !==
-        Number(
-          requestedQn
-        )
+      targetQn ===
+      null
+    ) {
+      const notHigher =
+        availableQns.filter(
+          qn =>
+            qn <=
+            wantedQn
+        );
+
+      targetQn =
+        notHigher.length
+          ? notHigher[0]
+          : availableQns[
+              availableQns.length -
+                1
+            ];
+
+      degraded =
+        true;
+    }
+
+    /*
+     * 首选编码在该画质缺失时，
+     * 按「自动」顺序继续回退，
+     * 避免降级后的画质又卡在编码上。
+     */
+    const codecIds =
+      [
+        ...(
+          CODECS[
+            codecPref
+          ]?.ids ||
+          CODECS
+            .auto
+            .ids
+        ),
+      ];
+
+    for (
+      const codecId
+      of CODECS
+        .auto
+        .ids
     ) {
       if (
-        Number(
-          requestedQn
-        ) >
-          80 &&
-        actualQn <=
-          80
+        !codecIds.includes(
+          codecId
+        )
       ) {
-        throw new Error(
-          '你的账号没有大会员，无法下载此画质视频。'
+        codecIds.push(
+          codecId
         );
       }
-
-      throw new Error(
-        'B站没有返回所选画质的视频流。'
-      );
     }
-
-    const exact =
-      videos.filter(
-        video =>
-          Number(
-            video.id
-          ) ===
-          Number(
-            requestedQn
-          )
-      );
-
-    if (
-      !exact.length
-    ) {
-      throw new Error(
-        '当前视频没有所选画质的视频流。'
-      );
-    }
-
-    const codecIds =
-      CODECS[
-        codecPref
-      ]?.ids ||
-      CODECS
-        .auto
-        .ids;
 
     for (
       const codecId
       of codecIds
     ) {
       const candidates =
-        exact
+        videos
           .filter(
             video =>
               Number(
                 video
+                  .id
+              ) ===
+                targetQn &&
+              Number(
+                video
                   .codecid
               ) ===
-              codecId
+                codecId
           )
           .sort(
             (
@@ -1843,7 +1902,15 @@
       if (
         candidates.length
       ) {
-        return candidates[0];
+        return {
+          video:
+            candidates[0],
+
+          actualQn:
+            targetQn,
+
+          degraded,
+        };
       }
     }
 
@@ -2947,7 +3014,53 @@
             'ASS 播放器字幕',
         },
       ],
-      'xml'
+      'ass'
+    );
+
+    setDropdownOptions(
+      'danmakuSize',
+      [
+        {
+          value:
+            '50',
+
+          label:
+            '50%',
+        },
+
+        {
+          value:
+            '75',
+
+          label:
+            '75%',
+        },
+
+        {
+          value:
+            '100',
+
+          label:
+            '100%',
+        },
+
+        {
+          value:
+            '125',
+
+          label:
+            '125%',
+        },
+
+        {
+          value:
+            '150',
+
+          label:
+            '150%',
+        },
+      ],
+      '100'
     );
   }
 
@@ -2958,10 +3071,20 @@
    */
 
   function getSelectedQn() {
-    return Number(
+    const value =
       getDropdownValue(
         'quality'
-      ) ||
+      );
+
+    if (
+      value ===
+      'auto'
+    ) {
+      return 'auto';
+    }
+
+    return Number(
+      value ||
       0
     );
   }
@@ -2980,7 +3103,32 @@
       getDropdownValue(
         'subtitle'
       ) ||
-      'xml'
+      'ass'
+    );
+  }
+
+  function getSelectedDanmakuScale() {
+    const value =
+      Number(
+        getDropdownValue(
+          'danmakuSize'
+        ) ||
+        100
+      );
+
+    if (
+      !Number.isFinite(
+        value
+      ) ||
+      value <=
+        0
+    ) {
+      return 1;
+    }
+
+    return (
+      value /
+      100
     );
   }
 
@@ -3389,11 +3537,11 @@
 
   function renderFormats() {
     const previous =
-      Number(
+      String(
         getDropdownValue(
           'quality'
         ) ||
-        0
+        ''
       );
 
     const formats =
@@ -3405,35 +3553,56 @@
               80
           );
 
+    const previousQn =
+      Number(
+        previous
+      );
+
     const preferred =
-      formats.some(
-        item =>
-          item.qn ===
-          previous
-      )
-        ? previous
+      previous ===
+      'auto'
+        ? 'auto'
         : formats.some(
               item =>
                 item.qn ===
-                80
+                previousQn
             )
-          ? 80
-          : formats[0]
-              ?.qn ||
-            '';
+          ? previousQn
+          : formats.some(
+                item =>
+                  item.qn ===
+                  80
+              )
+            ? 80
+            : formats[0]
+                ?.qn ||
+              '';
 
     setDropdownOptions(
       'quality',
 
-      formats.map(
-        item => ({
+      [
+        /*
+         * 固定置顶，不依赖当前视频探测到的档位。
+         */
+        {
           value:
-            item.qn,
+            'auto',
 
           label:
-            item.label,
-        })
-      ),
+            'Auto（视频最高清晰度）',
+        },
+
+        ...formats.map(
+          item => ({
+            value:
+              item.qn,
+
+            label:
+              item.label,
+          })
+        ),
+      ],
 
       preferred
     );
@@ -3848,19 +4017,28 @@
     total,
     options = {}
   ) {
-    const requestedQn =
-      Number(
-        options
-          .requestedQn ??
-        getSelectedQn()
-      );
+    const rawQn =
+      options
+        .requestedQn ??
+      getSelectedQn();
+
+    const autoQuality =
+      rawQn ===
+      'auto';
+
+    let requestedQn =
+      autoQuality
+        ? 0
+        : Number(
+            rawQn
+          );
 
     const codecPref =
       options
         .codecPref ||
       getSelectedCodec();
 
-    const qualityLabel =
+    let qualityLabel =
       options
         .qualityLabel ||
       getDropdownRoot(
@@ -3872,8 +4050,39 @@
         ?.textContent
         ?.trim() ||
       String(
-        requestedQn
+        rawQn
       );
+
+    /*
+     * Auto：先按 127 解析当前视频的可用档位，
+     * 挑出它自己的最高画质，再走原有流程。
+     */
+    let playData =
+      options
+        .playData ||
+      null;
+
+    if (
+      autoQuality
+    ) {
+      playData =
+        playData ||
+        await fetchPlayData(
+          item,
+          127
+        );
+
+      requestedQn =
+        pickHighestQn(
+          playData
+        );
+
+      qualityLabel =
+        quickQualityLabel(
+          requestedQn,
+          playData
+        );
+    }
 
     if (
       !requestedQn
@@ -3923,8 +4132,7 @@
     }
 
     const data =
-      options
-        .playData ||
+      playData ||
       await fetchPlayData(
         item,
         requestedQn
@@ -3939,12 +4147,15 @@
       );
     }
 
-    const video =
+    const picked =
       pickExactVideo(
         data,
         requestedQn,
         codecPref
       );
+
+    const video =
+      picked.video;
 
     const audio =
       pickAudio(
@@ -3962,15 +4173,32 @@
           .codecid
       );
 
+    /*
+     * 降级时改用实际画质的名称，
+     * 文件名与状态都按真实画质标注，
+     * 不把低画质伪装成所选档位。
+     */
+    const actualLabel =
+      picked.degraded
+        ? quickQualityLabel(
+            picked.actualQn,
+            data
+          )
+        : qualityLabel;
+
     const outputName =
       buildBaseName(
         item,
-        qualityLabel,
+        actualLabel,
         video
       );
 
     setStatus(
-      `[${index}/${total}] DASH 下载 ${qualityLabel}${
+      `[${index}/${total}] DASH 下载 ${actualLabel}${
+        picked.degraded
+          ? `（原选 ${qualityLabel}）`
+          : ''
+      }${
         fps
           ? ` · ${fps}`
           : ''
@@ -4486,7 +4714,8 @@
 
   function convertDanmakuXmlToAss(
     xml,
-    title
+    title,
+    scale = 1
   ) {
     const doc =
       new DOMParser()
@@ -4580,26 +4809,80 @@
     const fixedDuration =
       4;
 
+    /*
+     * 字号缩放同时作用于行高与留白，
+     * 轨道数量按剩余高度重新计算。
+     */
+    const sizeScale =
+      Math.max(
+        0.4,
+        Math.min(
+          3,
+          Number(
+            scale
+          ) ||
+          1
+        )
+      );
+
     const laneHeight =
-      54;
+      Math.max(
+        20,
+        Math.round(
+          54 *
+          sizeScale
+        )
+      );
+
+    const margin =
+      Math.max(
+        12,
+        Math.round(
+          48 *
+          sizeScale
+        )
+      );
+
+    const scrollLaneCount =
+      Math.max(
+        1,
+        Math.floor(
+          (
+            height -
+            margin *
+              2
+          ) /
+            laneHeight
+        )
+      );
+
+    const fixedLaneCount =
+      Math.max(
+        1,
+        Math.floor(
+          scrollLaneCount *
+            7 /
+            17
+        )
+      );
 
     const scrollFree =
       Array(
-        17
+        scrollLaneCount
       ).fill(
         0
       );
 
     const topFree =
       Array(
-        7
+        fixedLaneCount
       ).fill(
         0
       );
 
     const bottomFree =
       Array(
-        7
+        fixedLaneCount
       ).fill(
         0
       );
@@ -4658,16 +4941,21 @@
         start +
         scrollDuration;
 
+      /*
+       * 标准弹幕（size 25）在 PlayResY 1080 下约 38px，
+       * 占画面高度 3.5%，与主流弹幕转 ASS 工具一致。
+       */
       const fontSize =
-        Math.max(
-          24,
-          Math.min(
-            64,
-            Math.round(
+        Math.round(
+          Math.max(
+            24,
+            Math.min(
+              64,
               entry.size *
-              1.75
+                1.5
             )
-          )
+          ) *
+            sizeScale
         );
 
       let tag =
@@ -4694,7 +4982,12 @@
           fixedDuration;
 
         tag =
-          `\\an2\\pos(${width / 2},${height - 48 - lane * laneHeight})`;
+          `\\an2\\pos(${width / 2},${
+            height -
+            margin -
+            lane *
+              laneHeight
+          })`;
       } else if (
         entry.mode ===
         5
@@ -4716,7 +5009,11 @@
           fixedDuration;
 
         tag =
-          `\\an8\\pos(${width / 2},${48 + lane * laneHeight})`;
+          `\\an8\\pos(${width / 2},${
+            margin +
+            lane *
+              laneHeight
+          })`;
       } else if (
         entry.mode ===
         7
@@ -4742,7 +5039,7 @@
             0.82;
 
         const y =
-          48 +
+          margin +
           lane *
             laneHeight;
 
@@ -4864,7 +5161,8 @@
           xml,
           itemLabel(
             item
-          )
+          ),
+          getSelectedDanmakuScale()
         );
 
       saveBlob(
@@ -5003,6 +5301,66 @@
 
     throw new Error(
       '没有找到不高于 1080P60 的可下载视频流。'
+    );
+  }
+
+  /*
+   * 取当前视频实际可用的最高画质。
+   *
+   * 与极速下载不同，这里不设档位上限，
+   * 账号有权限时 4K / HDR 同样会被选中。
+   */
+  function pickHighestQn(
+    data
+  ) {
+    const available = [
+      ...new Set(
+        (
+          data
+            ?.dash
+            ?.video ||
+          []
+        )
+          .map(
+            stream =>
+              Number(
+                stream
+                  ?.id ||
+                0
+              )
+          )
+          .filter(
+            qn =>
+              qn >
+              0
+          )
+      ),
+    ];
+
+    if (
+      available.length
+    ) {
+      return Math.max(
+        ...available
+      );
+    }
+
+    const actual =
+      Number(
+        data
+          ?.quality ||
+        0
+      );
+
+    if (
+      actual >
+        0
+    ) {
+      return actual;
+    }
+
+    throw new Error(
+      '没有找到可下载的视频流。'
     );
   }
 
@@ -5185,21 +5543,27 @@
         'loading'
       );
 
-      await downloadOne(
-        item,
+      await withRetry(
+        qualityLabel,
         1,
         1,
-        {
-          requestedQn,
+        () =>
+          downloadOne(
+            item,
+            1,
+            1,
+            {
+              requestedQn,
 
-          codecPref:
-            'auto',
+              codecPref:
+                'auto',
 
-          qualityLabel,
+              qualityLabel,
 
-          playData:
-            data,
-        }
+              playData:
+                data,
+            }
+          )
       );
 
       setStatus(
@@ -5262,6 +5626,82 @@
    * =========================================================
    */
 
+  /*
+   * 单条下载的重试策略。
+   *
+   * 失败后重试 RETRY_TIMES 次，全部失败才向上抛出，
+   * 由批量入口记录并跳过，不影响后面的条目。
+   */
+  const RETRY_TIMES =
+    5;
+
+  const RETRY_DELAY =
+    1500;
+
+  async function withRetry(
+    label,
+    index,
+    total,
+    task
+  ) {
+    const maxAttempts =
+      RETRY_TIMES +
+      1;
+
+    let lastError =
+      null;
+
+    for (
+      let attempt = 1;
+      attempt <= maxAttempts;
+      attempt += 1
+    ) {
+      try {
+        await task();
+
+        return;
+      } catch (err) {
+        lastError =
+          err;
+
+        if (
+          attempt >=
+          maxAttempts
+        ) {
+          break;
+        }
+
+        const wait =
+          RETRY_DELAY *
+          attempt;
+
+        console.warn(
+          `[BiliDL] 第 ${attempt} 次失败，${wait}ms 后重试：`,
+          label,
+          err
+        );
+
+        setStatus(
+          `[${index}/${total}] 第 ${attempt} 次失败，${Math.round(
+            wait /
+              1000
+          )} 秒后重试（${attempt}/${RETRY_TIMES}）：${
+            err
+              ?.message ||
+            err
+          }`,
+          'error'
+        );
+
+        await sleep(
+          wait
+        );
+      }
+    }
+
+    throw lastError;
+  }
+
   async function startSingle(
     item
   ) {
@@ -5277,10 +5717,18 @@
     );
 
     try {
-      await downloadOne(
-        item,
+      await withRetry(
+        itemLabel(
+          item
+        ),
         1,
-        1
+        1,
+        () =>
+          downloadOne(
+            item,
+            1,
+            1
+          )
       );
 
       setStatus(
@@ -5340,6 +5788,9 @@
     let completed =
       0;
 
+    const failed =
+      [];
+
     try {
       for (
         let i = 0;
@@ -5347,14 +5798,45 @@
         items.length;
         i += 1
       ) {
-        await downloadOne(
-          items[i],
-          i + 1,
-          items.length
-        );
+        /*
+         * 单条出错重试耗尽后只记录，不中断整批。
+         */
+        try {
+          await withRetry(
+            itemLabel(
+              items[i]
+            ),
+            i + 1,
+            items.length,
+            () =>
+              downloadOne(
+                items[i],
+                i + 1,
+                items.length
+              )
+          );
 
-        completed +=
-          1;
+          completed +=
+            1;
+        } catch (err) {
+          console.error(
+            '[BiliDL] 条目下载失败：',
+            itemLabel(
+              items[i]
+            ),
+            err
+          );
+
+          failed.push(
+            `${itemLabel(
+              items[i]
+            )}：${
+              err
+                ?.message ||
+              err
+            }`
+          );
+        }
 
         if (
           i <
@@ -5366,35 +5848,65 @@
           );
         }
       }
-
-      setStatus(
-        `全部完成：${completed}/${items.length}`,
-        'ok'
-      );
-
-      setProgress(
-        100,
-        `完成 ${completed}/${items.length}`
-      );
     } catch (err) {
       console.error(
         '[BiliDL]',
         err
       );
 
-      setStatus(
-        `失败：${
+      failed.push(
+        `${
           err
             ?.message ||
           err
-        }`,
-        'error'
+        }`
       );
     } finally {
       setBusy(
         false
       );
     }
+
+    if (
+      failed.length
+    ) {
+      const preview =
+        failed
+          .slice(
+            0,
+            3
+          )
+          .join(
+            '；'
+          );
+
+      setStatus(
+        `完成 ${completed}/${items.length}，失败 ${failed.length} 条：${preview}${
+          failed.length >
+          3
+            ? ' …'
+            : ''
+        }`,
+        'error'
+      );
+
+      setProgress(
+        100,
+        `完成 ${completed}/${items.length}`
+      );
+
+      return;
+    }
+
+    setStatus(
+      `全部完成：${completed}/${items.length}`,
+      'ok'
+    );
+
+    setProgress(
+      100,
+      `完成 ${completed}/${items.length}`
+    );
   }
 
   async function startSelectedAudio() {
@@ -5422,6 +5934,9 @@
     let completed =
       0;
 
+    const failed =
+      [];
+
     try {
       for (
         let i = 0;
@@ -5429,14 +5944,45 @@
         items.length;
         i += 1
       ) {
-        await downloadAudioOne(
-          items[i],
-          i + 1,
-          items.length
-        );
+        /*
+         * 单条出错重试耗尽后只记录，不中断整批。
+         */
+        try {
+          await withRetry(
+            itemLabel(
+              items[i]
+            ),
+            i + 1,
+            items.length,
+            () =>
+              downloadAudioOne(
+                items[i],
+                i + 1,
+                items.length
+              )
+          );
 
-        completed +=
-          1;
+          completed +=
+            1;
+        } catch (err) {
+          console.error(
+            '[BiliDL] 音频下载失败：',
+            itemLabel(
+              items[i]
+            ),
+            err
+          );
+
+          failed.push(
+            `${itemLabel(
+              items[i]
+            )}：${
+              err
+                ?.message ||
+              err
+            }`
+          );
+        }
 
         if (
           i <
@@ -5448,35 +5994,65 @@
           );
         }
       }
-
-      setStatus(
-        `音频全部完成：${completed}/${items.length}`,
-        'ok'
-      );
-
-      setProgress(
-        100,
-        `音频完成 ${completed}/${items.length}`
-      );
     } catch (err) {
       console.error(
         '[BiliDL] audio download failed:',
         err
       );
 
-      setStatus(
-        `音频下载失败：${
+      failed.push(
+        `${
           err
             ?.message ||
           err
-        }`,
-        'error'
+        }`
       );
     } finally {
       setBusy(
         false
       );
     }
+
+    if (
+      failed.length
+    ) {
+      const preview =
+        failed
+          .slice(
+            0,
+            3
+          )
+          .join(
+            '；'
+          );
+
+      setStatus(
+        `音频完成 ${completed}/${items.length}，失败 ${failed.length} 条：${preview}${
+          failed.length >
+          3
+            ? ' …'
+            : ''
+        }`,
+        'error'
+      );
+
+      setProgress(
+        100,
+        `音频完成 ${completed}/${items.length}`
+      );
+
+      return;
+    }
+
+    setStatus(
+      `音频全部完成：${completed}/${items.length}`,
+      'ok'
+    );
+
+    setProgress(
+      100,
+      `音频完成 ${completed}/${items.length}`
+    );
   }
 
   async function startSelectedSubtitles() {
@@ -5507,6 +6083,9 @@
     let completed =
       0;
 
+    const failed =
+      [];
+
     try {
       for (
         let i = 0;
@@ -5514,15 +6093,46 @@
         items.length;
         i += 1
       ) {
-        await downloadSubtitleOne(
-          items[i],
-          i + 1,
-          items.length,
-          format
-        );
+        /*
+         * 单条出错重试耗尽后只记录，不中断整批。
+         */
+        try {
+          await withRetry(
+            itemLabel(
+              items[i]
+            ),
+            i + 1,
+            items.length,
+            () =>
+              downloadSubtitleOne(
+                items[i],
+                i + 1,
+                items.length,
+                format
+              )
+          );
 
-        completed +=
-          1;
+          completed +=
+            1;
+        } catch (err) {
+          console.error(
+            '[BiliDL] 弹幕下载失败：',
+            itemLabel(
+              items[i]
+            ),
+            err
+          );
+
+          failed.push(
+            `${itemLabel(
+              items[i]
+            )}：${
+              err
+                ?.message ||
+              err
+            }`
+          );
+        }
 
         if (
           i <
@@ -5534,35 +6144,65 @@
           );
         }
       }
-
-      setStatus(
-        `${format.toUpperCase()} 弹幕全部完成：${completed}/${items.length}`,
-        'ok'
-      );
-
-      setProgress(
-        100,
-        `弹幕 ${completed}/${items.length}`
-      );
     } catch (err) {
       console.error(
         '[BiliDL] subtitle download failed:',
         err
       );
 
-      setStatus(
-        `弹幕下载失败：${
+      failed.push(
+        `${
           err
             ?.message ||
           err
-        }`,
-        'error'
+        }`
       );
     } finally {
       setBusy(
         false
       );
     }
+
+    if (
+      failed.length
+    ) {
+      const preview =
+        failed
+          .slice(
+            0,
+            3
+          )
+          .join(
+            '；'
+          );
+
+      setStatus(
+        `弹幕完成 ${completed}/${items.length}，失败 ${failed.length} 条：${preview}${
+          failed.length >
+          3
+            ? ' …'
+            : ''
+        }`,
+        'error'
+      );
+
+      setProgress(
+        100,
+        `弹幕 ${completed}/${items.length}`
+      );
+
+      return;
+    }
+
+    setStatus(
+      `${format.toUpperCase()} 弹幕全部完成：${completed}/${items.length}`,
+      'ok'
+    );
+
+    setProgress(
+      100,
+      `弹幕 ${completed}/${items.length}`
+    );
   }
 
   /*
@@ -5570,6 +6210,156 @@
    * 拖拽 / 最小化
    * =========================================================
    */
+
+  /*
+   * 悬浮窗位置持久化。
+   *
+   * 只记住用户自己调整过的位置，
+   * 没调整过时仍然走样式表里的默认定位。
+   */
+  const PANEL_POSITION_KEY =
+    'tm-bili-downloader-position';
+
+  function applyPanelPosition(
+    panel,
+    left,
+    top
+  ) {
+    const maxLeft =
+      Math.max(
+        0,
+        window.innerWidth -
+          panel.offsetWidth
+      );
+
+    const maxTop =
+      Math.max(
+        0,
+        window.innerHeight -
+          panel.offsetHeight
+      );
+
+    panel.style.left =
+      `${Math.min(
+        Math.max(
+          0,
+          left
+        ),
+        maxLeft
+      )}px`;
+
+    panel.style.top =
+      `${Math.min(
+        Math.max(
+          0,
+          top
+        ),
+        maxTop
+      )}px`;
+
+    panel.style.right =
+      'auto';
+
+    panel.dataset.positioned =
+      '1';
+  }
+
+  function savePanelPosition(
+    panel
+  ) {
+    if (
+      panel.dataset.positioned !==
+      '1'
+    ) {
+      return;
+    }
+
+    const rect =
+      panel.getBoundingClientRect();
+
+    try {
+      window.localStorage.setItem(
+        PANEL_POSITION_KEY,
+
+        JSON.stringify(
+          {
+            left:
+              Math.round(
+                rect.left
+              ),
+
+            top:
+              Math.round(
+                rect.top
+              ),
+          }
+        )
+      );
+    } catch (err) {
+      console.warn(
+        '[BiliDL] 保存窗口位置失败：',
+        err
+      );
+    }
+  }
+
+  function restorePanelPosition(
+    panel
+  ) {
+    let saved =
+      null;
+
+    try {
+      saved =
+        JSON.parse(
+          window.localStorage.getItem(
+            PANEL_POSITION_KEY
+          ) ||
+            'null'
+        );
+    } catch (err) {
+      saved =
+        null;
+    }
+
+    if (
+      !saved ||
+      !Number.isFinite(
+        saved.left
+      ) ||
+      !Number.isFinite(
+        saved.top
+      )
+    ) {
+      return;
+    }
+
+    applyPanelPosition(
+      panel,
+      saved.left,
+      saved.top
+    );
+  }
+
+  function clampPanelToViewport(
+    panel
+  ) {
+    if (
+      panel.dataset.positioned !==
+      '1'
+    ) {
+      return;
+    }
+
+    const rect =
+      panel.getBoundingClientRect();
+
+    applyPanelPosition(
+      panel,
+      rect.left,
+      rect.top
+    );
+  }
 
   function pinPanelToCurrentScreenPosition(
     panel
@@ -5585,6 +6375,9 @@
 
     panel.style.right =
       'auto';
+
+    panel.dataset.positioned =
+      '1';
   }
 
   function bindDragAndMin(
@@ -5652,6 +6445,10 @@
             () => {
               requestAnimationFrame(
                 () => {
+                  clampPanelToViewport(
+                    panel
+                  );
+
                   scrollCurrentItemToTop();
                 }
               );
@@ -5803,6 +6600,13 @@
         if (
           dragMoved
         ) {
+          panel.dataset.positioned =
+            '1';
+
+          savePanelPosition(
+            panel
+          );
+
           panel.dataset.justDragged =
             '1';
 
@@ -5816,6 +6620,19 @@
             0
           );
         }
+      }
+    );
+
+    /*
+     * 视口变化后把已定位的面板收回可视区域。
+     */
+    window.addEventListener(
+      'resize',
+
+      () => {
+        clampPanelToViewport(
+          panel
+        );
       }
     );
   }
@@ -6072,7 +6889,7 @@
           <div
             class="tm-dropdown"
             data-name="subtitle"
-            data-value="xml"
+            data-value="ass"
           >
 
             <button
@@ -6082,7 +6899,35 @@
             >
 
               <span class="tm-select-label">
-                XML 原始弹幕
+                ASS 播放器字幕
+              </span>
+
+              ${dropdownArrowHtml()}
+
+            </button>
+
+            <div
+              class="tm-select-menu"
+              role="listbox"
+            ></div>
+
+          </div>
+
+          <div
+            class="tm-dropdown"
+            data-name="danmakuSize"
+            data-value="100"
+          >
+
+            <button
+              type="button"
+              class="tm-select-trigger"
+              aria-haspopup="listbox"
+              title="弹幕字号"
+            >
+
+              <span class="tm-select-label">
+                100%
               </span>
 
               ${dropdownArrowHtml()}
@@ -6133,6 +6978,10 @@
     `;
 
     document.body.appendChild(
+      panel
+    );
+
+    restorePanelPosition(
       panel
     );
 
@@ -7604,7 +8453,23 @@
         0;
 
       right:
-        0;
+        auto;
+
+      /*
+       * 菜单宽度跟随选项内容，
+       * 不再被触发器宽度截断。
+       */
+      min-width:
+        100%;
+
+      width:
+        max-content;
+
+      max-width:
+        calc(
+         100vw -
+          32px
+        );
 
       top:
         calc(
@@ -7615,8 +8480,12 @@
       z-index:
         60;
 
+      /*
+       * 高度正好容纳 5 个选项：
+       * 上下留白 7×2 + 选项 40×5 + 间隔 6×4。
+       */
       max-height:
-        255px;
+        238px;
 
       padding:
         7px;
@@ -8322,7 +9191,8 @@
 
     #${PANEL_ID} .tm-subtitle-actions {
       grid-template-columns:
-        166px
+        150px
+        92px
         minmax(
           0,
           1fr
@@ -8703,6 +9573,16 @@
               100vw -
               16px
             )
+          );
+      }
+
+      #${PANEL_ID} .tm-subtitle-actions {
+        grid-template-columns:
+          130px
+          82px
+          minmax(
+            0,
+            1fr
           );
       }
     }
